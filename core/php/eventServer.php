@@ -63,28 +63,43 @@ sse(
 $eqLogic->setConfiguration('sessionId', $id);
 $eqLogic->setConfiguration('connected', 1);
 $eqLogic->setConfiguration('scAll', 0);
+$eqLogic->setConfiguration('appState', 'active');
 $eqLogic->save();
 
 while (true) {
+  $logic = eqLogic::byLogicalId($apiKey, 'JeedomConnect');
+
   if (connection_aborted() || connection_status() != CONNECTION_NORMAL) {
     log::add('JeedomConnect', 'debug', "eventServer connexion closed for client #" . $id);
-    $logic = eqLogic::byLogicalId($apiKey, 'JeedomConnect');
     if ($logic->getConfiguration('sessionId', 0) == $id) {
       $logic->setConfiguration('connected', 0);
+      $eqLogic->setConfiguration('appState', 'background');
       $logic->save();
     }
     die();
+  }
+
+  if ($logic->getConfiguration('appState') != 'active') {
+    sleep(1);
+    continue;
   }
 
   $newConfig = apiHelper::lookForNewConfig(eqLogic::byLogicalId($apiKey, 'JeedomConnect'), $config['payload']['configVersion']);
   if ($newConfig != false && $newConfig['payload']['configVersion'] != $config['payload']['configVersion']) {
     log::add('JeedomConnect', 'debug', "eventServer send new config : " .  $newConfig['payload']['configVersion'] . ", old=" .  $config['payload']['configVersion']);
     $config = $newConfig;
+    sse(
+      json_encode(array('infos' => array(
+        'cmdInfo' => apiHelper::getCmdInfoData($config),
+        'scInfo' => apiHelper::getScenarioData($config),
+        'objInfo' => apiHelper::getObjectData($config)
+      )))
+    );
     sse(json_encode(array($newConfig)));
-    sleep(1);
+    //sleep(1);
   }
 
-  $actions = JeedomConnectActions::getAllAction($apiKey);
+  $actions = JeedomConnectActions::getAllActions($apiKey);
   if (count($actions) > 0) {
     $result = array(
       'type' => 'ACTIONS',
@@ -95,7 +110,7 @@ while (true) {
     }
     log::add('JeedomConnect', 'debug', "send action to #{$id}  " . json_encode(array($result)));
     sse(json_encode(array($result)));
-    JeedomConnectActions::removeAllAction($actions);
+    JeedomConnectActions::removeActions($actions);
     sleep(1);
   }
 

@@ -33,11 +33,6 @@ class ConnectLogic implements MessageComponentInterface {
 
 
 	/**
-	 * @var int Timestamp of the last events read
-	 */
-	private $lastReadTimestamp;
-
-	/**
 	 * Notifier constructor
 	 */
 	public function __construct($versionJson) {
@@ -48,7 +43,6 @@ class ConnectLogic implements MessageComponentInterface {
 		$this->authDelay = 3;
 		$this->pluginVersion = $versionJson->version;
 		$this->appRequire = $versionJson->require;
-		$this->lastReadTimestamp = time();
 	}
 
 
@@ -72,9 +66,7 @@ class ConnectLogic implements MessageComponentInterface {
 		if ($this->hasAuthenticatedClients) {
 			$this->lookForNewConfig();
 			$this->sendActions();
-			$events = \event::changes($this->lastReadTimestamp);
-			$this->lastReadTimestamp = time();
-			$this->broadcastEvents($events);
+			$this->broadcastEvents();
 		}
 	}
 
@@ -126,12 +118,6 @@ class ConnectLogic implements MessageComponentInterface {
 			$conn->close();
 			return;
 		} else {
-			if (!$this->hasAuthenticatedClients) {
-				// It is the first client, we store current timestamp for fetching events since this moment
-				$this->lastReadTimestamp = time();
-			}
-
-
 			$config = $eqLogic->getGeneratedConfigFile();
 			if ($eqLogic->getConfiguration('deviceId') == '') {
 				\log::add('JeedomConnect', 'info', "Register new device {$objectMsg->deviceName}");
@@ -203,12 +189,14 @@ class ConnectLogic implements MessageComponentInterface {
 			$conn->apiKey = $objectMsg->apiKey;
 			$conn->sessionId = rand(0, 1000);
 			$conn->configVersion = $config['payload']['configVersion'];
+			$conn->lastReadTimestamp = time();
 			$this->authenticatedClients->attach($conn);
 			$this->hasAuthenticatedClients = true;
 			$eqLogic->setConfiguration('platformOs', $objectMsg->platformOs);
 			$eqLogic->setConfiguration('sessionId', $conn->sessionId);
 			$eqLogic->setConfiguration('connected', 1);
 			$eqLogic->setConfiguration('scAll', 0);
+			$eqLogic->setConfiguration('appState', 'active');
 			$eqLogic->save();
 			\log::add('JeedomConnect', 'info', "#{$conn->resourceId} is authenticated with api Key '{$conn->apiKey}'");
 			$result = array(
@@ -277,7 +265,7 @@ class ConnectLogic implements MessageComponentInterface {
 
 		switch ($msg['type']) {
 			case 'CMD_EXEC':
-				\apiHelper::execCmd($msg['payload']['id'], $msg['payload']['options'] ?: null);
+				\apiHelper::execCmd($msg['payload']['id'], $msg['payload']['options'] ?? null);
 				break;
 			case 'CMDLIST_EXEC':
 				\apiHelper::execMultipleCmd($msg['payload']['cmdList']);
@@ -463,6 +451,13 @@ class ConnectLogic implements MessageComponentInterface {
 			case 'GET_GEOFENCES':
 				$this->sendGeofences($from);
 				break;
+			case 'GET_NOTIFS_CONFIG':
+				$eqLogic = \eqLogic::byLogicalId($from->apiKey, 'JeedomConnect');
+				$from->send(json_encode(array(
+					"type" => "SET_NOTIFS_CONFIG",
+					"payload" => $eqLogic->getNotifs()
+				)));
+				break;
 		}
 	}
 
@@ -478,6 +473,7 @@ class ConnectLogic implements MessageComponentInterface {
 		if (is_object($eqLogic)) {
 			if ($eqLogic->getConfiguration('sessionId', 0) == $conn->sessionId) {
 				$eqLogic->setConfiguration('connected', 0);
+				$eqLogic->setConfiguration('appState', 'background');
 				$eqLogic->save();
 			}
 		}
@@ -499,6 +495,7 @@ class ConnectLogic implements MessageComponentInterface {
 		if (is_object($eqLogic)) {
 			if ($eqLogic->getConfiguration('sessionId', 0) == $conn->sessionId) {
 				$eqLogic->setConfiguration('connected', 0);
+				$eqLogic->setConfiguration('appState', 'background');
 				$eqLogic->save();
 			}
 		}
@@ -514,21 +511,28 @@ class ConnectLogic implements MessageComponentInterface {
 	public function lookForNewConfig() {
 		foreach ($this->authenticatedClients as $client) {
 			$eqLogic = \eqLogic::byLogicalId($client->apiKey, 'JeedomConnect');
+			if ($eqLogic->getConfiguration('appState', '') != 'active') {
+				continue;
+			}
 			$newConfig = \apiHelper::lookForNewConfig($eqLogic, $client->configVersion);
 			if ($newConfig != false) {
 				$config = $newConfig;
 				\log::add('JeedomConnect', 'debug', "send new config to #{$client->resourceId} with api key " . $client->apiKey);
 				$client->configVersion = $newConfig['payload']['configVersion'];
-				$client->send(json_encode($newConfig));
 				$this->sendCmdInfo($client);
 				$this->sendScenarioInfo($client);
+				$client->send(json_encode($newConfig));
 			}
 		}
 	}
 
 	private function sendActions() {
 		foreach ($this->authenticatedClients as $client) {
-			$actions = \JeedomConnectActions::getAllAction($client->apiKey);
+			$eqLogic = \eqLogic::byLogicalId($client->apiKey, 'JeedomConnect');
+			if ($eqLogic->getConfiguration('appState', '') != 'active') {
+				continue;
+			}
+			$actions = \JeedomConnectActions::getAllActions($client->apiKey);
 			//\log::add('JeedomConnect', 'debug', "get action  ".json_encode($actions));
 			if (count($actions) > 0) {
 				$result = array(
@@ -540,14 +544,19 @@ class ConnectLogic implements MessageComponentInterface {
 				}
 				\log::add('JeedomConnect', 'debug', "send action to #{$client->resourceId}  " . json_encode($result));
 				$client->send(json_encode($result));
-				\JeedomConnectActions::removeAllAction($actions);
+				\JeedomConnectActions::removeActions($actions);
 			}
 		}
 	}
 
-	private function broadcastEvents($events) {
+	private function broadcastEvents() {
 		foreach ($this->authenticatedClients as $client) {
 			$eqLogic = \eqLogic::byLogicalId($client->apiKey, 'JeedomConnect');
+			if ($eqLogic->getConfiguration('appState', '') != 'active') {
+				continue;
+			}
+			$events = \event::changes($client->lastReadTimestamp);
+			$client->lastReadTimestamp = time();
 			$config = $eqLogic->getGeneratedConfigFile();
 			$eventsRes = \apiHelper::getEvents($events, $config, $eqLogic->getConfiguration('scAll', 0) == 1);
 
