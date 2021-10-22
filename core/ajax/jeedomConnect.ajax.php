@@ -127,6 +127,12 @@ try {
 		ajax::success();
 	}
 
+	if (init('action') == 'exportCustomData') {
+		log::add('JeedomConnect', 'debug', 'ajax -- fx exportCustomData');
+		JeedomConnectWidget::exportWidgetCustomConf();
+		ajax::success();
+	}
+
 	if (init('action') == 'uploadWidgets') {
 		log::add('JeedomConnect', 'debug', 'ajax -- fx uploadWidgets');
 		try {
@@ -552,6 +558,14 @@ try {
 			$eqLogic->saveNotifs($configJson);
 			ajax::success();
 		}
+	}
+
+	if (init('action') == 'saveNotifAll') {
+		$cmdList = init('cmdList');
+		if ($cmdList == "") $cmdList = array();
+		log::add('JeedomConnect', 'debug', 'saveNotifAll - info received : ' . json_encode($cmdList));
+		config::save('notifAll', json_encode($cmdList), 'JeedomConnect');
+		ajax::success();
 	}
 
 	if (init('action') == 'uploadImg') {
